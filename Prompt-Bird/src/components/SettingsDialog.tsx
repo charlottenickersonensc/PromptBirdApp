@@ -385,7 +385,7 @@ export function SettingsDialog({ open, onOpenChange, theme, onThemeChange }: Set
             
             <div className="text-center pt-4 border-t">
               <p className="text-sm text-muted-foreground">
-                PromptBook v1.0.0 • Made with ❤️ for developers
+                PromptBird v1.0.0 • Made with ❤️ for developers
               </p>
             </div>
           </div>

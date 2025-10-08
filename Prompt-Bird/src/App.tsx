@@ -19,11 +19,12 @@ import { toast } from 'sonner';
 import { Toaster } from './components/ui/sonner';
 import { Badge } from './components/ui/badge';
 import { useMobile } from './components/hooks/use-mobile';
+import promptBirdLogo from './assets/promptbird-logo.png';
 
 function AppContent() {
   const { theme, toggleTheme } = useTheme();
   const isMobile = useMobile();
-  const [currentPrompt, setCurrentPrompt] = useState('# Welcome to PromptBook\n\nYour **AI prompt engineering** workspace.\n\n## Getting Started\n\nStart writing your prompt here. Use **markdown** syntax for formatting.\n\n```javascript\n// Code blocks are supported\nconst prompt = "Your AI prompt here";\n```\n\n### Features\n- Rich markdown editing with *visible syntax*\n- Version history tracking\n- Built-in templates for software engineering\n- Easy table and diagram insertion\n- Comments and documentation\n- Sharing capabilities\n\n> This is a blockquote example\n\n## Visual Tables\n\nTables render visually and can be edited inline:\n\n| Feature | Status | Priority |\n| --- | --- | --- |\n| Visual Tables | ✅ Complete | High |\n| Mermaid Diagrams | ✅ Complete | High |\n| Drag & Drop Folders | ✅ Complete | Medium |\n\n## Mermaid Diagrams\n\nDiagrams render visually with editing capabilities:\n\n```mermaid\nflowchart TD\n    A[Start Prompt] --> B[Need Table?]\n    B --> C[Insert Table]\n    A --> D[Need Diagram?]\n    D --> E[Insert Mermaid]\n    A --> F[Continue Writing]\n    C --> G[Save & Share]\n    E --> G\n    F --> G\n```\n\n#### Checklist Example\n- [ ] Task 1\n- [x] Completed task\n- [ ] Task 2');
+  const [currentPrompt, setCurrentPrompt] = useState('# Welcome to PromptBird\n\nYour **AI prompt engineering** workspace.\n\n## Getting Started\n\nStart writing your prompt here. Use **markdown** syntax for formatting.\n\n```javascript\n// Code blocks are supported\nconst prompt = "Your AI prompt here";\n```\n\n### Features\n- Rich markdown editing with *visible syntax*\n- Version history tracking\n- Built-in templates for software engineering\n- Easy table and diagram insertion\n- Comments and documentation\n- Sharing capabilities\n\n> This is a blockquote example\n\n## Visual Tables\n\nTables render visually and can be edited inline:\n\n| Feature | Status | Priority |\n| --- | --- | --- |\n| Visual Tables | ✅ Complete | High |\n| Mermaid Diagrams | ✅ Complete | High |\n| Drag & Drop Folders | ✅ Complete | Medium |\n\n## Mermaid Diagrams\n\nDiagrams render visually with editing capabilities:\n\n```mermaid\nflowchart TD\n    A[Start Prompt] --> B[Need Table?]\n    B --> C[Insert Table]\n    A --> D[Need Diagram?]\n    D --> E[Insert Mermaid]\n    A --> F[Continue Writing]\n    C --> G[Save & Share]\n    E --> G\n    F --> G\n```\n\n#### Checklist Example\n- [ ] Task 1\n- [x] Completed task\n- [ ] Task 2');
   
   const [documentTitle, setDocumentTitle] = useState('Welcome Guide');
   const [activeTab, setActiveTab] = useState('templates');
@@ -334,7 +335,14 @@ function AppContent() {
       {!isMobile && (
         <div className="p-2 sm:p-4 border-b border-border">
           <div className="flex items-center justify-between gap-2">
-            <h1 className="text-sm sm:text-lg font-medium text-foreground truncate min-w-0">PromptBook</h1>
+            <div className="flex items-center min-w-0">
+              <img
+                src={promptBirdLogo}
+                alt="PromptBird"
+                className="h-12 w-12 shrink-0"
+              />
+              <h1 className="sr-only">PromptBird</h1>
+            </div>
             <div className="flex gap-1 sm:gap-2 shrink-0">
               <Button variant="ghost" size="icon" onClick={toggleTheme} className="h-8 w-8 sm:h-9 sm:w-9">
                 {theme === 'light' ? <Moon className="h-3 w-3 sm:h-4 sm:w-4" /> : <Sun className="h-3 w-3 sm:h-4 sm:w-4" />}
