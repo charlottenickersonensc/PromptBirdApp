@@ -40,7 +40,11 @@ const escapeHTML = (value: string) =>
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
+const ZERO_WIDTH_SPACE = '\u200B';
+
 const normalizePlainText = (value: string) => value.replace(/\r\n?/g, '\n');
+
+const removeZeroWidth = (value: string) => value.replace(new RegExp(ZERO_WIDTH_SPACE, 'g'), '');
 
 const collapseNonBreakingSpaces = (value: string) => value.replace(/\u00A0/g, ' ');
 
@@ -50,10 +54,10 @@ const getPlainTextFromEditor = (root: HTMLElement) => {
   );
 
   if (!lineElements.length) {
-    return normalizePlainText(collapseNonBreakingSpaces(root.textContent || ''));
+    return normalizePlainText(removeZeroWidth(collapseNonBreakingSpaces(root.textContent || '')));
   }
 
-  const lines = lineElements.map((element) => collapseNonBreakingSpaces(element.textContent || ''));
+  const lines = lineElements.map((element) => removeZeroWidth(collapseNonBreakingSpaces(element.textContent || '')));
 
   return normalizePlainText(lines.join('\n'));
 };
@@ -63,30 +67,111 @@ const isEditableFocused = (element: HTMLElement) => {
   return !!active && (active === element || element.contains(active));
 };
 
-const findTextNodeAt = (root: HTMLElement, offset: number) => {
-  let remaining = offset;
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-  let node = walker.nextNode() as Text | null;
-  let lastNode: Text | null = null;
+const getLineElements = (root: HTMLElement) =>
+  Array.from(root.children).filter(
+    (child): child is HTMLElement =>
+      child instanceof HTMLElement && child.classList.contains('markdown-line')
+  );
 
-  while (node) {
-    const length = node.nodeValue?.length ?? 0;
-    if (remaining <= length) {
-      return { node, offset: remaining };
+const findLineElement = (root: HTMLElement, node: Node | null): HTMLElement | null => {
+  let current: Node | null = node;
+  while (current && current !== root) {
+    if (current instanceof HTMLElement && current.classList.contains('markdown-line')) {
+      return current;
     }
-    remaining -= length;
-    lastNode = node;
-    node = walker.nextNode() as Text | null;
+    current = current.parentNode;
   }
-
-  if (lastNode) {
-    return { node: lastNode, offset: lastNode.nodeValue?.length ?? 0 };
-  }
-
   return null;
 };
 
-const getSelectionOffsets = (root: HTMLElement): SelectionSnapshot | null => {
+const lineColumnToOffset = (lines: string[], lineIndex: number, column: number) => {
+  const clampedLineIndex = Math.max(0, Math.min(lineIndex, lines.length - 1));
+  const clampedColumn = Math.max(0, column);
+
+  let offset = 0;
+  for (let i = 0; i < clampedLineIndex; i++) {
+    offset += lines[i].length;
+    offset += 1; // newline separator
+  }
+  return offset + clampedColumn;
+};
+
+const offsetToLineColumn = (lines: string[], offset: number) => {
+  const clampedOffset = Math.max(0, offset);
+  let remaining = clampedOffset;
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineLength = lines[i].length;
+    if (remaining <= lineLength) {
+      return { lineIndex: i, column: remaining };
+    }
+
+    remaining -= lineLength;
+
+    if (i === lines.length - 1) {
+      return { lineIndex: i, column: lineLength };
+    }
+
+    // Account for newline character between lines
+    if (remaining === 0) {
+      return { lineIndex: i + 1, column: 0 };
+    }
+
+    remaining -= 1;
+
+    if (remaining < 0) {
+      return { lineIndex: i + 1, column: 0 };
+    }
+  }
+
+  const lastIndex = Math.max(0, lines.length - 1);
+  return { lineIndex: lastIndex, column: lines[lastIndex]?.length ?? 0 };
+};
+
+const getActualOffsetFromVisible = (text: string, visibleIndex: number) => {
+  if (visibleIndex <= 0) {
+    return 0;
+  }
+
+  let visibleCount = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charAt(i) === ZERO_WIDTH_SPACE) {
+      continue;
+    }
+
+    visibleCount++;
+    if (visibleCount >= visibleIndex) {
+      return i + 1;
+    }
+  }
+
+  return text.length;
+};
+
+const resolveColumnWithinLine = (lineElement: HTMLElement, column: number) => {
+  const walker = document.createTreeWalker(lineElement, NodeFilter.SHOW_TEXT, null);
+  let remaining = column;
+  let textNode = walker.nextNode() as Text | null;
+
+  while (textNode) {
+    const rawText = textNode.textContent || '';
+    const visibleLength = removeZeroWidth(rawText).length;
+
+    if (remaining <= visibleLength) {
+      const actualOffset = getActualOffsetFromVisible(rawText, remaining);
+      return { node: textNode, offset: actualOffset };
+    }
+
+    remaining -= visibleLength;
+    textNode = walker.nextNode() as Text | null;
+  }
+
+  const childCount = lineElement.childNodes.length;
+  const clampedOffset = Math.min(Math.max(column, 0), childCount);
+  return { node: lineElement, offset: clampedOffset };
+};
+
+const getSelectionOffsets = (root: HTMLElement, content: string): SelectionSnapshot | null => {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return null;
 
@@ -95,27 +180,65 @@ const getSelectionOffsets = (root: HTMLElement): SelectionSnapshot | null => {
     return null;
   }
 
-  const preSelectionStart = document.createRange();
-  preSelectionStart.selectNodeContents(root);
-  preSelectionStart.setEnd(range.startContainer, range.startOffset);
-  const start = preSelectionStart.toString().length;
+  const lines = content.split('\n');
+  const lineElements = getLineElements(root);
 
-  const preSelectionEnd = document.createRange();
-  preSelectionEnd.selectNodeContents(root);
-  preSelectionEnd.setEnd(range.endContainer, range.endOffset);
-  const end = preSelectionEnd.toString().length;
+  const resolveEndpoint = (container: Node, offset: number) => {
+    const lineElement = findLineElement(root, container);
+    if (!lineElement) return null;
+
+    const lineIndex = lineElements.indexOf(lineElement);
+    if (lineIndex === -1) return null;
+
+    const tempRange = document.createRange();
+    tempRange.selectNodeContents(lineElement);
+
+    try {
+      tempRange.setEnd(container, offset);
+    } catch (_error) {
+      return null;
+    }
+
+    const columnText = removeZeroWidth(tempRange.toString());
+    const column = columnText.length;
+
+    return lineColumnToOffset(lines, lineIndex, column);
+  };
+
+  const start = resolveEndpoint(range.startContainer, range.startOffset);
+  const end = resolveEndpoint(range.endContainer, range.endOffset);
+
+  if (start == null || end == null) return null;
 
   return { start, end };
 };
 
-const restoreSelection = (root: HTMLElement, snapshot: SelectionSnapshot | null) => {
+const restoreSelection = (
+  root: HTMLElement,
+  snapshot: SelectionSnapshot | null,
+  content: string
+) => {
   if (!snapshot) return;
   const selection = window.getSelection();
   if (!selection) return;
 
-  const startPosition = findTextNodeAt(root, snapshot.start);
-  const endPosition = findTextNodeAt(root, snapshot.end);
-  if (!startPosition || !endPosition) return;
+  const lines = content.split('\n');
+  const lineElements = getLineElements(root);
+
+  const resolvePosition = (offset: number) => {
+    const { lineIndex, column } = offsetToLineColumn(lines, offset);
+    const clampedLineIndex = Math.max(0, Math.min(lineIndex, lineElements.length - 1));
+    const lineElement = lineElements[clampedLineIndex];
+
+    if (!lineElement) {
+      return { node: root, offset: root.childNodes.length } as const;
+    }
+
+    return resolveColumnWithinLine(lineElement, column);
+  };
+
+  const startPosition = resolvePosition(snapshot.start);
+  const endPosition = resolvePosition(snapshot.end);
 
   const range = document.createRange();
   range.setStart(startPosition.node, startPosition.offset);
@@ -302,14 +425,14 @@ export function VisualMarkdownEditor({
     }
 
     if (wasFocused) {
-      restoreSelection(target, snapshot);
+      restoreSelection(target, snapshot, displayValueRef.current);
     }
   }, [parsedHTML, isComposing]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
       if (!editorRef.current) return;
-      const snapshot = getSelectionOffsets(editorRef.current);
+  const snapshot = getSelectionOffsets(editorRef.current, displayValueRef.current);
       if (snapshot) {
         selectionRef.current = snapshot;
       }
@@ -322,7 +445,7 @@ export function VisualMarkdownEditor({
   const syncSelection = useCallback((root?: HTMLElement) => {
     const target = root ?? editorRef.current;
     if (!target) return;
-    const snapshot = getSelectionOffsets(target);
+  const snapshot = getSelectionOffsets(target, displayValueRef.current);
     if (snapshot) {
       selectionRef.current = snapshot;
     }
@@ -337,6 +460,7 @@ export function VisualMarkdownEditor({
       syncSelection(target);
 
       if (plainText !== displayValueRef.current) {
+        displayValueRef.current = plainText;
         onChange(plainText);
       }
     },
@@ -348,19 +472,20 @@ export function VisualMarkdownEditor({
       return selectionRef.current;
     }
     if (editorRef.current) {
-      return getSelectionOffsets(editorRef.current);
+      return getSelectionOffsets(editorRef.current, displayValueRef.current);
     }
     return null;
   }, []);
 
   const applyUpdate = useCallback(
     (updatedValue: string, newSelection: SelectionSnapshot) => {
+      displayValueRef.current = updatedValue;
       onChange(updatedValue);
       selectionRef.current = newSelection;
 
       requestAnimationFrame(() => {
         if (editorRef.current) {
-          restoreSelection(editorRef.current, newSelection);
+          restoreSelection(editorRef.current, newSelection, updatedValue);
         }
       });
     },
