@@ -1,13 +1,24 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+  useMemo
+} from 'react';
 import { Button } from './ui/button';
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger
+} from './ui/dialog';
 import { Code } from 'lucide-react';
 import { Separator } from './ui/separator';
 import { MermaidIcon } from './MermaidIcon';
 import { TableSizePicker } from './TableSizePicker';
-import { VisualTable } from './VisualTable';
-import { VisualMermaid } from './VisualMermaid';
 import type { TemplateVariable } from './VariablesPanel';
 
 interface VisualMarkdownEditorProps {
@@ -18,469 +29,577 @@ interface VisualMarkdownEditorProps {
   variables?: TemplateVariable[];
 }
 
-export function VisualMarkdownEditor({ 
-  value, 
-  onChange, 
-  readOnly = false, 
+type SelectionSnapshot = {
+  start: number;
+  end: number;
+};
+
+const escapeHTML = (value: string) =>
+  value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+const normalizePlainText = (value: string) => value.replace(/\r\n?/g, '\n');
+
+const collapseNonBreakingSpaces = (value: string) => value.replace(/\u00A0/g, ' ');
+
+const getPlainTextFromEditor = (root: HTMLElement) => {
+  const lineElements = Array.from(root.children).filter(
+    (child): child is HTMLElement => child instanceof HTMLElement && child.classList.contains('markdown-line')
+  );
+
+  if (!lineElements.length) {
+    return normalizePlainText(collapseNonBreakingSpaces(root.textContent || ''));
+  }
+
+  const lines = lineElements.map((element) => collapseNonBreakingSpaces(element.textContent || ''));
+
+  return normalizePlainText(lines.join('\n'));
+};
+
+const isEditableFocused = (element: HTMLElement) => {
+  const active = document.activeElement;
+  return !!active && (active === element || element.contains(active));
+};
+
+const findTextNodeAt = (root: HTMLElement, offset: number) => {
+  let remaining = offset;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  let node = walker.nextNode() as Text | null;
+  let lastNode: Text | null = null;
+
+  while (node) {
+    const length = node.nodeValue?.length ?? 0;
+    if (remaining <= length) {
+      return { node, offset: remaining };
+    }
+    remaining -= length;
+    lastNode = node;
+    node = walker.nextNode() as Text | null;
+  }
+
+  if (lastNode) {
+    return { node: lastNode, offset: lastNode.nodeValue?.length ?? 0 };
+  }
+
+  return null;
+};
+
+const getSelectionOffsets = (root: HTMLElement): SelectionSnapshot | null => {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+    return null;
+  }
+
+  const preSelectionStart = document.createRange();
+  preSelectionStart.selectNodeContents(root);
+  preSelectionStart.setEnd(range.startContainer, range.startOffset);
+  const start = preSelectionStart.toString().length;
+
+  const preSelectionEnd = document.createRange();
+  preSelectionEnd.selectNodeContents(root);
+  preSelectionEnd.setEnd(range.endContainer, range.endOffset);
+  const end = preSelectionEnd.toString().length;
+
+  return { start, end };
+};
+
+const restoreSelection = (root: HTMLElement, snapshot: SelectionSnapshot | null) => {
+  if (!snapshot) return;
+  const selection = window.getSelection();
+  if (!selection) return;
+
+  const startPosition = findTextNodeAt(root, snapshot.start);
+  const endPosition = findTextNodeAt(root, snapshot.end);
+  if (!startPosition || !endPosition) return;
+
+  const range = document.createRange();
+  range.setStart(startPosition.node, startPosition.offset);
+  range.setEnd(endPosition.node, endPosition.offset);
+
+  selection.removeAllRanges();
+  selection.addRange(range);
+};
+
+const formatInlineMarkdown = (text: string, variables: TemplateVariable[]) => {
+  let html = escapeHTML(text);
+
+  const codePlaceholders: string[] = [];
+  html = html.replace(/`([^`]+)`/g, (_match, code) => {
+    const index = codePlaceholders.length;
+    codePlaceholders.push(
+      `<span class="markdown-code">\`${escapeHTML(code)}\`</span>`
+    );
+    return `__CODE_INLINE_${index}__`;
+  });
+
+  html = html.replace(/(\*\*|__)(.+?)\1/g, (_match, wrapper, inner) => {
+    return `<span class="markdown-bold">${wrapper}${inner}${wrapper}</span>`;
+  });
+
+  html = html.replace(
+    /(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g,
+    (_match, inner) => `<span class="markdown-italic">*${inner}*</span>`
+  );
+
+  html = html.replace(
+    /(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g,
+    (_match, inner) => `<span class="markdown-italic">_${inner}_</span>`
+  );
+
+  html = html.replace(
+    /~~(.+?)~~/g,
+    (_match, inner) => `<span class="markdown-strikethrough">~~${inner}~~</span>`
+  );
+
+  html = html.replace(
+    /\[([^\]]+)\]\(([^)]+)\)/g,
+    (_match, textLabel, url) =>
+      `<span class="markdown-link">[<span class="markdown-link-text">${textLabel}</span>](<span class="markdown-link-url">${url}</span>)</span>`
+  );
+
+  html = html.replace(/\{\{([^}]+)\}\}/g, (_match, variableName) => {
+    const trimmed = variableName.trim();
+    const variable = variables.find(
+      (v) => v.name.toLowerCase() === trimmed.toLowerCase()
+    );
+
+    if (variable) {
+      const description = escapeHTML(variable.description || variable.name);
+      const value = escapeHTML(variable.value);
+      return `<span class="markdown-variable" title="${description}: ${value}">{{${escapeHTML(trimmed)}}}</span>`;
+    }
+
+    return `<span class="markdown-variable-undefined" title="Undefined variable: ${escapeHTML(trimmed)}">{{${escapeHTML(trimmed)}}}</span>`;
+  });
+
+  codePlaceholders.forEach((replacement, index) => {
+    html = html.replace(`__CODE_INLINE_${index}__`, replacement);
+  });
+
+  return html;
+};
+
+const parseMarkdownToHTML = (content: string, variables: TemplateVariable[]) => {
+  if (!content) return '';
+
+  const normalizedContent = normalizePlainText(content);
+  const lines = normalizedContent.split('\n');
+
+  const htmlLines: string[] = [];
+  let inCodeFence = false;
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('```')) {
+      inCodeFence = !inCodeFence;
+      htmlLines.push(
+        `<div class="markdown-line markdown-code-block">${escapeHTML(line)}</div>`
+      );
+      return;
+    }
+
+    if (inCodeFence) {
+      htmlLines.push(
+        `<div class="markdown-line markdown-code-block">${escapeHTML(line)}</div>`
+      );
+      return;
+    }
+
+    if (trimmed === '') {
+      htmlLines.push('<div class="markdown-line"><br /></div>');
+      return;
+    }
+
+    if (/^(---|\*\*\*|___)$/.test(trimmed)) {
+      htmlLines.push('<div class="markdown-line markdown-hr">---</div>');
+      return;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})(\s+)(.*)$/);
+    if (headingMatch) {
+      const [, hashes, spacing, text] = headingMatch;
+      htmlLines.push(
+        `<div class="markdown-line markdown-h${hashes.length}">${escapeHTML(hashes)}${spacing}${formatInlineMarkdown(text, variables)}</div>`
+      );
+      return;
+    }
+
+    const blockquoteMatch = line.match(/^>\s?(.*)$/);
+    if (blockquoteMatch) {
+      htmlLines.push(
+        `<div class="markdown-line markdown-blockquote">&gt; ${formatInlineMarkdown(blockquoteMatch[1], variables)}</div>`
+      );
+      return;
+    }
+
+    const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
+    if (listMatch) {
+      const [, indent, marker, text] = listMatch;
+      const indentHtml = escapeHTML(indent).replace(/ /g, '&nbsp;');
+      htmlLines.push(
+        `<div class="markdown-line markdown-list">${indentHtml}${escapeHTML(marker)} ${formatInlineMarkdown(text, variables)}</div>`
+      );
+      return;
+    }
+
+    if (/^\|.*\|$/.test(trimmed)) {
+      htmlLines.push(
+        `<div class="markdown-line markdown-table-row">${escapeHTML(line)}</div>`
+      );
+      return;
+    }
+
+    htmlLines.push(
+      `<div class="markdown-line">${formatInlineMarkdown(line, variables)}</div>`
+    );
+  });
+
+  return htmlLines.join('');
+};
+
+export function VisualMarkdownEditor({
+  value,
+  onChange,
+  readOnly = false,
   previewContent,
   variables = []
 }: VisualMarkdownEditorProps) {
   const [mermaidOpen, setMermaidOpen] = useState(false);
   const editorRef = useRef<HTMLDivElement>(null);
+  const selectionRef = useRef<SelectionSnapshot | null>(null);
   const [isComposing, setIsComposing] = useState(false);
 
-  // Update editor content when value prop changes (for external updates)
+  const displayValue = previewContent ?? value;
+  const displayValueRef = useRef(displayValue);
+
   useEffect(() => {
-    if (editorRef.current && !isComposing) {
-      const currentContent = editorRef.current.textContent || '';
-      if (currentContent !== value) {
-        // Preserve cursor position
-        const selection = window.getSelection();
-        const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
-        const startOffset = range?.startOffset || 0;
-        const endOffset = range?.endOffset || 0;
-        
-        editorRef.current.textContent = value;
-        
-        // Restore cursor position
-        if (range && editorRef.current.firstChild) {
-          try {
-            const newRange = document.createRange();
-            const textNode = editorRef.current.firstChild;
-            const maxOffset = (textNode as Text).length;
-            newRange.setStart(textNode, Math.min(startOffset, maxOffset));
-            newRange.setEnd(textNode, Math.min(endOffset, maxOffset));
-            selection?.removeAllRanges();
-            selection?.addRange(newRange);
-          } catch (e) {
-            // If cursor restoration fails, just place at end
-            const newRange = document.createRange();
-            newRange.selectNodeContents(editorRef.current);
-            newRange.collapse(false);
-            selection?.removeAllRanges();
-            selection?.addRange(newRange);
-          }
+    displayValueRef.current = displayValue;
+  }, [displayValue]);
+
+  const parsedHTML = useMemo(
+    () => parseMarkdownToHTML(displayValue, variables),
+    [displayValue, variables]
+  );
+
+  useLayoutEffect(() => {
+    if (!editorRef.current) return;
+    if (isComposing) return;
+
+    const target = editorRef.current;
+    const wasFocused = isEditableFocused(target);
+    const snapshot = wasFocused ? selectionRef.current : null;
+
+    if (parsedHTML) {
+      target.innerHTML = parsedHTML;
+    } else {
+      target.innerHTML = '';
+    }
+
+    if (wasFocused) {
+      restoreSelection(target, snapshot);
+    }
+  }, [parsedHTML, isComposing]);
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      if (!editorRef.current) return;
+      const snapshot = getSelectionOffsets(editorRef.current);
+      if (snapshot) {
+        selectionRef.current = snapshot;
+      }
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, []);
+
+  const syncSelection = useCallback((root?: HTMLElement) => {
+    const target = root ?? editorRef.current;
+    if (!target) return;
+    const snapshot = getSelectionOffsets(target);
+    if (snapshot) {
+      selectionRef.current = snapshot;
+    }
+  }, []);
+
+  const handleInput = useCallback(
+    (event: React.FormEvent<HTMLDivElement>) => {
+      if (readOnly) return;
+      const target = event.currentTarget;
+      const plainText = getPlainTextFromEditor(target);
+
+      syncSelection(target);
+
+      if (plainText !== displayValueRef.current) {
+        onChange(plainText);
+      }
+    },
+    [onChange, readOnly, syncSelection]
+  );
+
+  const getSelectionSnapshot = useCallback((): SelectionSnapshot | null => {
+    if (selectionRef.current) {
+      return selectionRef.current;
+    }
+    if (editorRef.current) {
+      return getSelectionOffsets(editorRef.current);
+    }
+    return null;
+  }, []);
+
+  const applyUpdate = useCallback(
+    (updatedValue: string, newSelection: SelectionSnapshot) => {
+      onChange(updatedValue);
+      selectionRef.current = newSelection;
+
+      requestAnimationFrame(() => {
+        if (editorRef.current) {
+          restoreSelection(editorRef.current, newSelection);
         }
-      }
-    }
-  }, [value, isComposing]);
+      });
+    },
+    [onChange]
+  );
 
-  const handleInput = useCallback(() => {
-    if (editorRef.current && !readOnly) {
-      const newContent = editorRef.current.textContent || '';
-      onChange(newContent);
-    }
-  }, [onChange, readOnly]);
+  const formatText = useCallback(
+    (format: 'bold' | 'italic' | 'code' | 'header') => {
+      if (readOnly) return;
+      if (!editorRef.current) return;
 
-  const handleKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (readOnly) return;
+      const selection = getSelectionSnapshot();
+      if (!selection) return;
 
-    // Handle common markdown shortcuts
-    if (e.metaKey || e.ctrlKey) {
-      switch (e.key) {
-        case 'b':
-          e.preventDefault();
-          formatText('bold');
-          break;
-        case 'i':
-          e.preventDefault();
-          formatText('italic');
-          break;
-        case 'k':
-          e.preventDefault();
-          formatText('code');
-          break;
-      }
-    }
+      const content = displayValueRef.current;
+      const { start, end } = selection;
+      if (start === end) return;
 
-    // Handle Enter key for list continuation
-    if (e.key === 'Enter') {
-      const selection = window.getSelection();
-      if (selection && selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        const content = editorRef.current?.textContent || '';
-        const cursorPos = range.startOffset;
-        
-        // Find the current line
-        const lines = content.substring(0, cursorPos).split('\n');
-        const currentLine = lines[lines.length - 1];
-        
-        // Check if we're in a list
-        const listMatch = currentLine.match(/^(\s*)([-*+]|\d+\.)\s/);
-        if (listMatch) {
-          e.preventDefault();
-          const indent = listMatch[1];
-          const marker = listMatch[2];
-          
-          // If the line only contains the marker, remove it and unindent
-          if (currentLine.trim() === marker) {
-            const beforeCursor = content.substring(0, cursorPos - currentLine.length);
-            const afterCursor = content.substring(cursorPos);
-            const newContent = beforeCursor + '\n' + afterCursor;
-            onChange(newContent);
-            return;
-          }
-          
-          // Otherwise, continue the list
-          const nextMarker = marker.match(/\d+/) ? `${parseInt(marker) + 1}.` : marker;
-          const newContent = content.substring(0, cursorPos) + 
-                           `\n${indent}${nextMarker} ` + 
-                           content.substring(cursorPos);
-          onChange(newContent);
-          
-          // Set cursor position after the new marker
-          setTimeout(() => {
-            if (editorRef.current) {
-              const newCursorPos = cursorPos + `\n${indent}${nextMarker} `.length;
-              const textNode = editorRef.current.firstChild as Text;
-              if (textNode) {
-                const range = document.createRange();
-                range.setStart(textNode, Math.min(newCursorPos, textNode.length));
-                range.collapse(true);
-                selection.removeAllRanges();
-                selection.addRange(range);
-              }
-            }
-          }, 0);
-        }
-      }
-    }
-  }, [onChange, readOnly]);
+      const selectedText = content.slice(start, end);
+      let formatted = selectedText;
+      let newStart = start;
+      let newEnd = end;
 
-  const formatText = useCallback((format: string) => {
-    if (readOnly || !editorRef.current) return;
-    
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) return;
-    
-    const range = selection.getRangeAt(0);
-    const selectedText = range.toString();
-    const content = editorRef.current.textContent || '';
-    
-    if (selectedText) {
-      const startOffset = range.startOffset;
-      const endOffset = range.endOffset;
-      
-      let formattedText = '';
       switch (format) {
         case 'bold':
-          formattedText = `**${selectedText}**`;
+          formatted = `**${selectedText}**`;
+          newStart = start;
+          newEnd = start + formatted.length;
           break;
         case 'italic':
-          formattedText = `*${selectedText}*`;
+          formatted = `*${selectedText}*`;
+          newStart = start;
+          newEnd = start + formatted.length;
           break;
         case 'code':
-          formattedText = `\`${selectedText}\``;
+          formatted = `\`${selectedText}\``;
+          newStart = start;
+          newEnd = start + formatted.length;
           break;
-        case 'header':
-          // For headers, format the entire line
+        case 'header': {
           const lines = content.split('\n');
-          const charCount = content.substring(0, startOffset).split('\n').length - 1;
-          const currentLine = lines[charCount];
-          const newLine = currentLine.startsWith('## ') ? currentLine.substring(3) : `## ${currentLine}`;
-          lines[charCount] = newLine;
-          onChange(lines.join('\n'));
+          let charCounter = 0;
+          for (let index = 0; index < lines.length; index++) {
+            const line = lines[index];
+            const lineStart = charCounter;
+            const lineEnd = charCounter + line.length;
+
+            if (start >= lineStart && end <= lineEnd) {
+              if (line.startsWith('## ')) {
+                lines[index] = line.slice(3);
+                const updatedValue = lines.join('\n');
+                applyUpdate(
+                  updatedValue,
+                  {
+                    start: Math.max(lineStart, start - 3),
+                    end: Math.max(lineStart, end - 3)
+                  }
+                );
+              } else {
+                lines[index] = `## ${line}`;
+                const updatedValue = lines.join('\n');
+                applyUpdate(
+                  updatedValue,
+                  {
+                    start: start + 3,
+                    end: end + 3
+                  }
+                );
+              }
+              return;
+            }
+
+            charCounter += line.length + 1;
+          }
           return;
+        }
       }
-      
-      // Find the actual character positions in the text content
-      const beforeText = content.substring(0, startOffset);
-      const afterText = content.substring(endOffset);
-      const newContent = beforeText + formattedText + afterText;
-      
-      onChange(newContent);
-      
-      // Restore selection after formatting
-      setTimeout(() => {
-        if (editorRef.current && editorRef.current.firstChild) {
-          const textNode = editorRef.current.firstChild as Text;
-          const newRange = document.createRange();
-          const newStart = startOffset;
-          const newEnd = startOffset + formattedText.length;
-          
-          try {
-            newRange.setStart(textNode, Math.min(newStart, textNode.length));
-            newRange.setEnd(textNode, Math.min(newEnd, textNode.length));
-            selection.removeAllRanges();
-            selection.addRange(newRange);
-          } catch (e) {
-            // If selection fails, just place cursor at end
-            newRange.selectNodeContents(editorRef.current);
-            newRange.collapse(false);
-            selection.removeAllRanges();
-            selection.addRange(newRange);
+
+      const updatedValue =
+        content.substring(0, start) + formatted + content.substring(end);
+
+      applyUpdate(updatedValue, { start: newStart, end: newEnd });
+    },
+    [applyUpdate, getSelectionSnapshot, readOnly]
+  );
+
+  const insertTable = useCallback(
+    (rows: number, cols: number) => {
+      if (readOnly) return;
+      const content = displayValueRef.current;
+      const selection = getSelectionSnapshot() ?? {
+        start: content.length,
+        end: content.length
+      };
+
+      const headers = Array(cols)
+        .fill('Header')
+        .map((header, index) => `${header} ${index + 1}`)
+        .join(' | ');
+      const separator = Array(cols).fill('---').join(' | ');
+      const tableRows = Array(Math.max(rows - 1, 1))
+        .fill('')
+        .map((_, rowIndex) =>
+          Array(cols)
+            .fill('Cell')
+            .map((cell, colIndex) => `${cell} ${rowIndex + 1}-${colIndex + 1}`)
+            .join(' | ')
+        )
+        .join('\n');
+
+      const table = `\n\n| ${headers} |\n| ${separator} |\n${tableRows
+        .split('\n')
+        .map((row) => `| ${row} |`)
+        .join('\n')}\n\n`;
+
+      const updatedValue =
+        content.slice(0, selection.start) +
+        table +
+        content.slice(selection.end);
+
+      const cursor = selection.start + table.length;
+      applyUpdate(updatedValue, { start: cursor, end: cursor });
+    },
+    [applyUpdate, getSelectionSnapshot, readOnly]
+  );
+
+  const insertMermaidDiagram = useCallback(
+    (type: string) => {
+      if (readOnly) return;
+      const content = displayValueRef.current;
+      const selection = getSelectionSnapshot() ?? {
+        start: content.length,
+        end: content.length
+      };
+
+      const diagrams: Record<string, string> = {
+        flowchart: `\n\n\`\`\`mermaid\nflowchart TD\n    A[Start] --> B{Decision}\n    B -->|Yes| C[Action 1]\n    B -->|No| D[Action 2]\n    C --> E[End]\n    D --> E\n\`\`\`\n\n`,
+        sequence: `\n\n\`\`\`mermaid\nsequenceDiagram\n    participant A as User\n    participant B as System\n    A->>B: Request\n    B-->>A: Response\n\`\`\`\n\n`,
+        gantt: `\n\n\`\`\`mermaid\ngantt\n    title Project Timeline\n    dateFormat  YYYY-MM-DD\n    section Planning\n    Research    :2024-01-01, 7d\n    Design      :2024-01-08, 5d\n    section Development\n    Backend     :2024-01-13, 10d\n    Frontend    :2024-01-20, 8d\n\`\`\`\n\n`
+      };
+
+      const snippet = diagrams[type] ?? diagrams.flowchart;
+      const updatedValue =
+        content.slice(0, selection.start) +
+        snippet +
+        content.slice(selection.end);
+
+      const cursor = selection.start + snippet.length;
+      applyUpdate(updatedValue, { start: cursor, end: cursor });
+      setMermaidOpen(false);
+    },
+    [applyUpdate, getSelectionSnapshot, readOnly]
+  );
+
+  const insertCodeBlock = useCallback(
+    (language: string) => {
+      if (readOnly) return;
+      const content = displayValueRef.current;
+      const selection = getSelectionSnapshot() ?? {
+        start: content.length,
+        end: content.length
+      };
+
+      const codeBlock = `\n\n\`\`\`${language}\n// Your code here\n\`\`\`\n\n`;
+      const updatedValue =
+        content.slice(0, selection.start) +
+        codeBlock +
+        content.slice(selection.end);
+
+      const cursor = selection.start + codeBlock.length;
+      applyUpdate(updatedValue, { start: cursor, end: cursor });
+    },
+    [applyUpdate, getSelectionSnapshot, readOnly]
+  );
+
+  const handleKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (readOnly) return;
+
+      if (event.metaKey || event.ctrlKey) {
+        switch (event.key) {
+          case 'b':
+            event.preventDefault();
+            formatText('bold');
+            return;
+          case 'i':
+            event.preventDefault();
+            formatText('italic');
+            return;
+          case 'k':
+            event.preventDefault();
+            formatText('code');
+            return;
+          default:
+            break;
+        }
+      }
+
+      if (event.key === 'Enter') {
+        const selection = getSelectionSnapshot();
+        if (!selection) return;
+
+        const content = displayValueRef.current;
+        const cursorPos = selection.start;
+        const beforeCursor = content.slice(0, cursorPos);
+        const lines = beforeCursor.split('\n');
+        const currentLine = lines[lines.length - 1];
+        const listMatch = currentLine.match(/^(\s*)([-*+]|\d+\.)\s+/);
+
+        if (listMatch) {
+          event.preventDefault();
+          const indent = listMatch[1];
+          const marker = listMatch[2];
+          const lineContent = currentLine.slice(listMatch[0].length);
+
+          if (!lineContent.trim()) {
+            const listStart = cursorPos - currentLine.length;
+            const updatedValue =
+              content.slice(0, listStart) + content.slice(cursorPos);
+            applyUpdate(updatedValue, { start: listStart, end: listStart });
+            return;
           }
-        }
-      }, 0);
-    }
-  }, [onChange, readOnly]);
 
-  const insertTable = (rows: number, cols: number) => {
-    if (readOnly || !editorRef.current) return;
-    
-    const headers = Array(cols).fill('Header').map((h, i) => `${h} ${i + 1}`).join(' | ');
-    const separator = Array(cols).fill('---').join(' | ');
-    const tableRows = Array(rows - 1).fill('').map((_, rowIndex) => 
-      Array(cols).fill('Cell').map((c, colIndex) => `${c} ${rowIndex + 1}-${colIndex + 1}`).join(' | ')
-    );
-    
-    const table = `\n\n| ${headers} |\n| ${separator} |\n${tableRows.map(row => `| ${row} |`).join('\n')}\n\n`;
-    
-    const selection = window.getSelection();
-    if (selection && selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      const cursorPos = range.startOffset;
-      const content = editorRef.current.textContent || '';
-      const newContent = content.substring(0, cursorPos) + table + content.substring(cursorPos);
-      onChange(newContent);
-    } else {
-      onChange(value + table);
-    }
-  };
+          const nextMarker = marker.match(/\d+/)
+            ? `${parseInt(marker, 10) + 1}.`
+            : marker;
+          const insertion = `\n${indent}${nextMarker} `;
+          const updatedValue =
+            content.slice(0, cursorPos) +
+            insertion +
+            content.slice(cursorPos);
 
-  const insertMermaidDiagram = (type: string) => {
-    if (readOnly || !editorRef.current) return;
-    
-    const diagrams = {
-      flowchart: `\n\n\`\`\`mermaid\nflowchart TD\n    A[Start] --> B{Decision}\n    B -->|Yes| C[Action 1]\n    B -->|No| D[Action 2]\n    C --> E[End]\n    D --> E\n\`\`\`\n\n`,
-      sequence: `\n\n\`\`\`mermaid\nsequenceDiagram\n    participant A as User\n    participant B as System\n    A->>B: Request\n    B-->>A: Response\n\`\`\`\n\n`,
-      gantt: `\n\n\`\`\`mermaid\ngantt\n    title Project Timeline\n    dateFormat  YYYY-MM-DD\n    section Planning\n    Research    :2024-01-01, 7d\n    Design      :2024-01-08, 5d\n    section Development\n    Backend     :2024-01-13, 10d\n    Frontend    :2024-01-20, 8d\n\`\`\`\n\n`
-    };
-    
-    const diagram = diagrams[type as keyof typeof diagrams];
-    
-    const selection = window.getSelection();
-    if (selection && selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      const cursorPos = range.startOffset;
-      const content = editorRef.current.textContent || '';
-      const newContent = content.substring(0, cursorPos) + diagram + content.substring(cursorPos);
-      onChange(newContent);
-    } else {
-      onChange(value + diagram);
-    }
-    
-    setMermaidOpen(false);
-  };
-
-  // Parse markdown and apply styling while preserving syntax
-  const parseMarkdownToHTML = (content: string): string => {
-    let html = content;
-    
-    // Escape HTML characters first
-    html = html
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>');
-    
-    // Headers (preserve the # symbols but style the text)
-  html = html.replace(/^(#{1,6})\s+(.+)$/gm, (_match, hashes, text) => {
-      const level = hashes.length;
-      const headerClass = `markdown-h${level}`;
-      return `<span class="${headerClass}">${hashes} ${text}</span>`;
-    });
-    
-    // Bold text (**text** or __text__)
-    html = html.replace(/(\*\*|__)([^*_]+)\1/g, '<span class="markdown-bold">$1$2$1</span>');
-    
-    // Italic text (*text* or _text_)
-    html = html.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<span class="markdown-italic">*$1*</span>');
-    html = html.replace(/(?<!_)_([^_]+)_(?!_)/g, '<span class="markdown-italic">_$1_</span>');
-    
-    // Inline code (`code`)
-    html = html.replace(/`([^`]+)`/g, '<span class="markdown-code">`$1`</span>');
-    
-    // Code blocks (```language\ncode\n```)
-    html = html.replace(/```(\w*)\n([\s\S]*?)\n```/g, 
-      '<span class="markdown-code-block">```$1\n$2\n```</span>');
-    
-    // Strikethrough (~~text~~)
-    html = html.replace(/~~([^~]+)~~/g, '<span class="markdown-strikethrough">~~$1~~</span>');
-    
-    // Blockquotes (> text)
-    html = html.replace(/^>\s+(.+)$/gm, '<span class="markdown-blockquote">> $1</span>');
-    
-    // Lists (- item, * item, + item, 1. item)
-    html = html.replace(/^(\s*)([-*+]|\d+\.)\s+(.+)$/gm, 
-      '<span class="markdown-list">$1$2 $3</span>');
-    
-    // Links ([text](url))
-    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, 
-      '<span class="markdown-link">[<span class="markdown-link-text">$1</span>](<span class="markdown-link-url">$2</span>)</span>');
-    
-    // Horizontal rules (--- or ***)
-    html = html.replace(/^(---|\*\*\*|___)$/gm, '<span class="markdown-hr">$1</span>');
-    
-    // Template variables ({{VariableName}})
-  html = html.replace(/\{\{([^}]+)\}\}/g, (_match, variableName) => {
-      const trimmedName = variableName.trim();
-      const variable = variables.find(v => v.name.toLowerCase() === trimmedName.toLowerCase());
-      
-      if (variable) {
-        return `<span class="markdown-variable" title="${variable.description || variable.name}: ${variable.value}">{{${trimmedName}}}</span>`;
-      } else {
-        return `<span class="markdown-variable-undefined" title="Undefined variable: ${trimmedName}">{{${trimmedName}}}</span>`;
-      }
-    });
-    
-    return html;
-  };
-
-  // Parse and render content with visual components for tables and diagrams
-  const renderContent = () => {
-    // Use preview content for rendering if available, but edit the original value
-  const content = previewContent || value;
-  const parts: ReactNode[] = [];
-    let currentIndex = 0;
-    let partKey = 0;
-
-    // Find tables and mermaid blocks
-    const tableRegex = /(\|[^\n]*\|[\n\r]+(?:\|[^\n]*\|[\n\r]*)*)/gm;
-    const mermaidRegex = /```mermaid\n([\s\S]*?)\n```/gm;
-    
-    // Combine all matches with their positions
-    const matches: Array<{ start: number; end: number; type: 'table' | 'mermaid'; content: string }> = [];
-    
-    let match;
-    while ((match = tableRegex.exec(content)) !== null) {
-      matches.push({
-        start: match.index,
-        end: match.index + match[0].length,
-        type: 'table',
-        content: match[0].trim()
-      });
-    }
-    
-    // Reset regex
-    mermaidRegex.lastIndex = 0;
-    while ((match = mermaidRegex.exec(content)) !== null) {
-      matches.push({
-        start: match.index,
-        end: match.index + match[0].length,
-        type: 'mermaid',
-        content: match[1].trim()
-      });
-    }
-    
-    // Sort matches by start position
-    matches.sort((a, b) => a.start - b.start);
-    
-    // If there are visual components, render them separately from editable text
-    if (matches.length > 0) {
-      matches.forEach((match) => {
-        // Add text before this match
-        if (currentIndex < match.start) {
-          const beforeText = content.slice(currentIndex, match.start);
-          if (beforeText.trim()) {
-            const styledHTML = parseMarkdownToHTML(beforeText);
-            parts.push(
-              <div
-                key={partKey++}
-                ref={currentIndex === 0 ? editorRef : undefined}
-                contentEditable={!readOnly}
-                suppressContentEditableWarning={true}
-                onInput={handleInput}
-                onKeyDown={handleKeyDown}
-                onCompositionStart={() => setIsComposing(true)}
-                onCompositionEnd={() => setIsComposing(false)}
-                className="min-h-[1.5em] outline-none whitespace-pre-wrap font-mono text-sm leading-relaxed focus:ring-0 markdown-content"
-                style={{ wordBreak: 'break-word' }}
-                dangerouslySetInnerHTML={{ __html: styledHTML }}
-              />
-            );
-          }
-        }
-        
-        // Add the visual component
-        if (match.type === 'table') {
-          parts.push(
-            <VisualTable
-              key={partKey++}
-              markdown={match.content}
-              onChange={(newMarkdown) => {
-                const newContent = content.slice(0, match.start) + newMarkdown + content.slice(match.end);
-                onChange(newContent);
-              }}
-              readOnly={readOnly}
-            />
-          );
-        } else if (match.type === 'mermaid') {
-          parts.push(
-            <VisualMermaid
-              key={partKey++}
-              code={match.content}
-              onChange={(newCode) => {
-                const newMarkdown = `\`\`\`mermaid\n${newCode}\n\`\`\``;
-                const newContent = content.slice(0, match.start) + newMarkdown + content.slice(match.end);
-                onChange(newContent);
-              }}
-              readOnly={readOnly}
-            />
-          );
-        }
-        
-        currentIndex = match.end;
-      });
-      
-      // Add remaining text
-      if (currentIndex < content.length) {
-        const remainingText = content.slice(currentIndex);
-        if (remainingText.trim()) {
-          const styledHTML = parseMarkdownToHTML(remainingText);
-          parts.push(
-            <div
-              key={partKey++}
-              contentEditable={!readOnly}
-              suppressContentEditableWarning={true}
-              onInput={handleInput}
-              onKeyDown={handleKeyDown}
-              onCompositionStart={() => setIsComposing(true)}
-              onCompositionEnd={() => setIsComposing(false)}
-              className="min-h-[1.5em] outline-none whitespace-pre-wrap font-mono text-sm leading-relaxed focus:ring-0 markdown-content"
-              style={{ wordBreak: 'break-word' }}
-              dangerouslySetInnerHTML={{ __html: styledHTML }}
-            />
-          );
+          const cursor = cursorPos + insertion.length;
+          applyUpdate(updatedValue, { start: cursor, end: cursor });
         }
       }
-      
-      return parts;
-    }
-    
-    // If no visual components, render single editable area with markdown styling
-    if (!content) {
-      return (
-        <div
-          ref={editorRef}
-          contentEditable={!readOnly}
-          suppressContentEditableWarning={true}
-          onInput={handleInput}
-          onKeyDown={handleKeyDown}
-          onCompositionStart={() => setIsComposing(true)}
-          onCompositionEnd={() => setIsComposing(false)}
-          className="min-h-[1.5em] outline-none whitespace-pre-wrap font-mono text-sm leading-relaxed focus:ring-0 markdown-content"
-          style={{ wordBreak: 'break-word' }}
-          data-placeholder="Start writing your prompt here..."
-        />
-      );
-    }
-
-    const styledHTML = parseMarkdownToHTML(content);
-    return (
-      <div
-        ref={editorRef}
-        contentEditable={!readOnly}
-        suppressContentEditableWarning={true}
-        onInput={handleInput}
-        onKeyDown={handleKeyDown}
-        onCompositionStart={() => setIsComposing(true)}
-        onCompositionEnd={() => setIsComposing(false)}
-        className="min-h-[1.5em] outline-none whitespace-pre-wrap font-mono text-sm leading-relaxed focus:ring-0 markdown-content"
-        style={{ wordBreak: 'break-word' }}
-        dangerouslySetInnerHTML={{ __html: styledHTML }}
-      />
-    );
-  };
+    },
+    [applyUpdate, formatText, getSelectionSnapshot, readOnly]
+  );
 
   return (
     <div className="flex-1 flex flex-col">
@@ -488,48 +607,52 @@ export function VisualMarkdownEditor({
       {!readOnly && (
         <div className="p-1.5 sm:p-2 md:p-3 border-b border-border bg-background/50 flex items-center gap-0.5 sm:gap-1 md:gap-2 flex-wrap overflow-x-auto">
           <div className="flex items-center gap-0.5 shrink-0">
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => formatText('bold')}
               className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0"
             >
               <span className="font-bold text-xs">B</span>
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => formatText('italic')}
               className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0"
             >
               <span className="italic text-xs">I</span>
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => formatText('code')}
               className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0"
             >
               <Code className="h-2.5 sm:h-3 w-2.5 sm:w-3" />
             </Button>
-            <Button 
-              variant="ghost" 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => formatText('header')}
               className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0 text-xs"
             >
               H2
             </Button>
           </div>
-          
+
           <Separator orientation="vertical" className="h-4 sm:h-5 md:h-6 shrink-0" />
-          
+
           <div className="flex items-center gap-0.5 shrink-0">
             <TableSizePicker onTableSelect={insertTable} />
 
             <Dialog open={mermaidOpen} onOpenChange={setMermaidOpen}>
               <DialogTrigger asChild>
-                <Button variant="ghost" size="sm" className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0"
+                >
                   <MermaidIcon className="h-2.5 sm:h-3 w-2.5 sm:w-3" />
                 </Button>
               </DialogTrigger>
@@ -541,22 +664,22 @@ export function VisualMarkdownEditor({
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-2">
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     onClick={() => insertMermaidDiagram('flowchart')}
                     className="w-full justify-start"
                   >
                     Flowchart
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     onClick={() => insertMermaidDiagram('sequence')}
                     className="w-full justify-start"
                   >
                     Sequence Diagram
                   </Button>
-                  <Button 
-                    variant="outline" 
+                  <Button
+                    variant="outline"
                     onClick={() => insertMermaidDiagram('gantt')}
                     className="w-full justify-start"
                   >
@@ -566,6 +689,35 @@ export function VisualMarkdownEditor({
               </DialogContent>
             </Dialog>
           </div>
+
+          <Separator orientation="vertical" className="h-4 sm:h-5 md:h-6 shrink-0" />
+
+          <div className="flex items-center gap-0.5 shrink-0">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => insertCodeBlock('javascript')}
+              className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0 text-xs"
+            >
+              JS
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => insertCodeBlock('python')}
+              className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0 text-xs"
+            >
+              PY
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => insertCodeBlock('typescript')}
+              className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0 text-xs"
+            >
+              TS
+            </Button>
+          </div>
         </div>
       )}
 
@@ -573,7 +725,20 @@ export function VisualMarkdownEditor({
       <div className="flex-1 overflow-auto">
         <div className="p-4 min-h-full">
           <div className="max-w-none">
-            {renderContent()}
+            <div
+              ref={editorRef}
+              contentEditable={!readOnly}
+              suppressContentEditableWarning={true}
+              onInput={handleInput}
+              onKeyDown={handleKeyDown}
+              onCompositionStart={() => setIsComposing(true)}
+              onCompositionEnd={() => {
+                setIsComposing(false);
+                syncSelection();
+              }}
+              className="min-h-[1.5em] outline-none whitespace-pre-wrap font-mono text-sm leading-relaxed focus:ring-0 markdown-content"
+              data-placeholder="Start writing your prompt here..."
+            />
           </div>
         </div>
       </div>

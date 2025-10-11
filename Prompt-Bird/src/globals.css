@@ -206,6 +206,19 @@ html {
   display: block;
 }
 
+.markdown-content .markdown-line {
+  display: block;
+  white-space: pre-wrap;
+}
+
+.markdown-content .markdown-table-row {
+  display: block;
+  font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+  white-space: pre;
+  color: var(--color-foreground);
+  margin: 0.25rem 0;
+}
+
 .markdown-content .markdown-h2 {
   font-size: 1.5rem;
   font-weight: 600;
@@ -332,6 +345,17 @@ html {
   border-top: 2px solid var(--color-border);
   margin: 2rem 0;
   width: 100%;
+}
+
+.markdown-content .markdown-line {
+  margin: 0;
+  display: block;
+  white-space: pre-wrap;
+}
+
+.markdown-content .markdown-table-row {
+  display: block;
+  font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
 }
 
 /* Dark mode adjustments */
