@@ -287,16 +287,80 @@ html {
 .markdown-content .markdown-code-block {
   background-color: var(--color-muted);
   color: var(--color-foreground);
-  padding: 1rem;
-  border-radius: 0.5rem;
   font-family: 'SFMono-Regular', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
   font-size: 0.875rem;
   line-height: 1.5;
-  border: 1px solid var(--color-border);
-  margin: 1rem 0;
   display: block;
   white-space: pre-wrap;
   overflow-x: auto;
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+  padding: 0.35rem 1rem;
+  margin: 0;
+  position: relative;
+}
+
+.markdown-content .markdown-code-block[data-block-role="start"] {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+  border-top-left-radius: 0.5rem;
+  border-top-right-radius: 0.5rem;
+}
+
+.markdown-content .markdown-code-block[data-block-role="middle"] {
+  border-top: none;
+}
+
+.markdown-content .markdown-code-block[data-block-role="end"] {
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--color-border);
+  border-bottom-left-radius: 0.5rem;
+  border-bottom-right-radius: 0.5rem;
+}
+
+.markdown-content .markdown-code-block:not([data-block-role="start"]) {
+  padding-top: 0.35rem;
+}
+
+.markdown-content .markdown-code-block:not([data-block-role="end"]) {
+  padding-bottom: 0.35rem;
+}
+
+.markdown-content .markdown-code-text {
+  display: block;
+}
+
+.markdown-content .markdown-code-toggle {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.6rem;
+  border: 1px solid var(--color-border);
+  background-color: var(--color-card);
+  color: var(--color-muted-foreground);
+  border-radius: 0.375rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  opacity: 0.6;
+}
+
+.markdown-content .markdown-code-block[data-block-role="start"]:hover .markdown-code-toggle,
+.markdown-content .markdown-code-toggle:focus-visible {
+  opacity: 1;
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.markdown-content .markdown-code-toggle::before {
+  content: '⇆';
+  font-size: 0.75rem;
+  font-weight: 600;
 }
 
 .markdown-content .markdown-strikethrough {
@@ -367,6 +431,12 @@ html {
 .dark .markdown-content .markdown-code-block {
   background-color: var(--color-muted);
   border-color: var(--color-border);
+}
+
+.dark .markdown-content .markdown-code-toggle {
+  background-color: var(--color-background);
+  border-color: var(--color-border);
+  color: var(--color-muted-foreground);
 }
 
 .dark .markdown-content .markdown-blockquote {

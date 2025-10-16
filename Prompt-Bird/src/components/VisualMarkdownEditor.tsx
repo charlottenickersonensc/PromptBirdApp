@@ -15,10 +15,15 @@ import {
   DialogTitle,
   DialogTrigger
 } from './ui/dialog';
-import { Code } from 'lucide-react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+import { Textarea } from './ui/textarea';
+import { Code, BarChart3 } from 'lucide-react';
 import { Separator } from './ui/separator';
 import { MermaidIcon } from './MermaidIcon';
 import { TableSizePicker } from './TableSizePicker';
+import { VisualMermaid } from './VisualMermaid';
+import { VisualChartBlock } from './VisualChartBlock';
+import { CodeEditorBlock } from './CodeEditorBlock';
 import type { TemplateVariable } from './VariablesPanel';
 
 interface VisualMarkdownEditorProps {
@@ -32,6 +37,33 @@ interface VisualMarkdownEditorProps {
 type SelectionSnapshot = {
   start: number;
   end: number;
+};
+
+type VisualBlockType = 'mermaid' | 'chart' | 'code';
+
+type VisualBlock = {
+  id: string;
+  type: VisualBlockType;
+  language: string;
+  rawLanguage: string;
+  start: number;
+  end: number;
+  code: string;
+  startLine: number;
+  endLine: number;
+};
+
+type VisualBlockParseResult = {
+  html: string;
+  blocks: VisualBlock[];
+};
+
+type MarkdownFenceCapture = {
+  language: string;
+  startLine: number;
+  startOffset: number;
+  codeLines: string[];
+  blockIndex: number;
 };
 
 const escapeHTML = (value: string) =>
@@ -307,32 +339,147 @@ const formatInlineMarkdown = (text: string, variables: TemplateVariable[]) => {
   return html;
 };
 
-const parseMarkdownToHTML = (content: string, variables: TemplateVariable[]) => {
-  if (!content) return '';
+const parseMarkdownWithVisualBlocks = (
+  content: string,
+  variables: TemplateVariable[]
+): VisualBlockParseResult => {
+  if (!content) {
+    return { html: '', blocks: [] };
+  }
 
   const normalizedContent = normalizePlainText(content);
   const lines = normalizedContent.split('\n');
 
-  const htmlLines: string[] = [];
-  let inCodeFence = false;
+  type LineMeta = { blockIndex: number; role: 'start' | 'middle' | 'end' };
 
-  lines.forEach((line) => {
+  const lineMeta = new Map<number, LineMeta>();
+  const blocksInfo: Array<{ 
+    language: string;
+    startLine: number;
+    endLine: number;
+    startOffset: number;
+    endOffset: number;
+    codeLines: string[];
+  }> = [];
+
+  let offset = 0;
+  let activeBlock: MarkdownFenceCapture | null = null;
+
+  lines.forEach((line, index) => {
     const trimmed = line.trim();
-
     if (trimmed.startsWith('```')) {
-      inCodeFence = !inCodeFence;
+      if (!activeBlock) {
+        const language = trimmed.slice(3).trim();
+        const blockIndex = blocksInfo.length;
+        activeBlock = {
+          language,
+          startLine: index,
+          startOffset: offset,
+          codeLines: [],
+          blockIndex
+        };
+        lineMeta.set(index, { blockIndex, role: 'start' });
+      } else {
+        const blockIndex = activeBlock.blockIndex;
+        lineMeta.set(index, { blockIndex, role: 'end' });
+        blocksInfo.push({
+          language: activeBlock.language,
+          startLine: activeBlock.startLine,
+          endLine: index,
+          startOffset: activeBlock.startOffset,
+          endOffset: offset + line.length + 1,
+          codeLines: activeBlock.codeLines.slice()
+        });
+        activeBlock = null;
+      }
+    } else if (activeBlock) {
+      activeBlock.codeLines.push(line);
+      lineMeta.set(index, { blockIndex: activeBlock.blockIndex, role: 'middle' });
+    }
+
+    offset += line.length + 1;
+  });
+
+  if (activeBlock != null) {
+    const blockRef = activeBlock as MarkdownFenceCapture;
+    const { blockIndex, language, startLine, startOffset } = blockRef;
+    blocksInfo.push({
+      language,
+      startLine,
+      endLine: lines.length - 1,
+      startOffset,
+      endOffset: normalizedContent.length,
+      codeLines: [...blockRef.codeLines]
+    });
+
+    for (let lineIndex = startLine; lineIndex < lines.length; lineIndex++) {
+      if (!lineMeta.has(lineIndex)) {
+        const role =
+          lineIndex === startLine
+            ? 'start'
+            : lineIndex === lines.length - 1
+              ? 'end'
+              : 'middle';
+        lineMeta.set(lineIndex, { blockIndex, role });
+      } else if (lineIndex === lines.length - 1) {
+        lineMeta.set(lineIndex, { blockIndex, role: 'end' });
+      }
+    }
+  }
+
+  const blocks: VisualBlock[] = blocksInfo.map((info, index) => {
+    const rawLanguage = info.language || '';
+    const normalizedLanguage = rawLanguage.toLowerCase();
+    const blockType: VisualBlockType =
+      normalizedLanguage === 'mermaid'
+        ? 'mermaid'
+        : normalizedLanguage.startsWith('chart')
+          ? 'chart'
+          : 'code';
+
+    return {
+      id: `block-${index}`,
+      type: blockType,
+      language:
+        blockType === 'chart'
+          ? 'json'
+          : normalizedLanguage || rawLanguage || 'markdown',
+      rawLanguage,
+      start: info.startOffset,
+      end: info.endOffset ?? normalizedContent.length,
+      code: info.codeLines.join('\n'),
+      startLine: info.startLine,
+      endLine: info.endLine
+    };
+  });
+
+  const blockIndexMap = new Map<number, VisualBlock>();
+  blocks.forEach((block, index) => {
+    blockIndexMap.set(index, block);
+  });
+
+  const htmlLines: string[] = [];
+
+  lines.forEach((line, index) => {
+    const blockMeta = lineMeta.get(index);
+    if (blockMeta) {
+      const block = blockIndexMap.get(blockMeta.blockIndex);
+      const languageAttr =
+        blockMeta.role === 'start' && block
+          ? ` data-block-language="${escapeHTML(block.rawLanguage)}"`
+          : '';
+      const toggleButton =
+        blockMeta.role === 'start' && block
+          ? `<button type="button" class="markdown-code-toggle" data-block-button="${block.id}" contenteditable="false" aria-label="Toggle visual editor"></button>`
+          : '';
+
       htmlLines.push(
-        `<div class="markdown-line markdown-code-block">${escapeHTML(line)}</div>`
+        `<div class="markdown-line markdown-code-block" data-block-id="${block?.id ?? ''}" data-block-role="${blockMeta.role}"${languageAttr}>${toggleButton}<span class="markdown-code-text">${escapeHTML(line)}</span></div>`
       );
       return;
     }
 
-    if (inCodeFence) {
-      htmlLines.push(
-        `<div class="markdown-line markdown-code-block">${escapeHTML(line)}</div>`
-      );
-      return;
-    }
+    const trimmed = line.trim();
 
     if (trimmed === '') {
       htmlLines.push('<div class="markdown-line"><br /></div>');
@@ -383,7 +530,10 @@ const parseMarkdownToHTML = (content: string, variables: TemplateVariable[]) => 
     );
   });
 
-  return htmlLines.join('');
+  return {
+    html: htmlLines.join(''),
+    blocks
+  };
 };
 
 export function VisualMarkdownEditor({
@@ -397,6 +547,8 @@ export function VisualMarkdownEditor({
   const editorRef = useRef<HTMLDivElement>(null);
   const selectionRef = useRef<SelectionSnapshot | null>(null);
   const [isComposing, setIsComposing] = useState(false);
+  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
+  const [blockMode, setBlockMode] = useState<'visual' | 'markdown'>('visual');
 
   const displayValue = previewContent ?? value;
   const displayValueRef = useRef(displayValue);
@@ -405,10 +557,12 @@ export function VisualMarkdownEditor({
     displayValueRef.current = displayValue;
   }, [displayValue]);
 
-  const parsedHTML = useMemo(
-    () => parseMarkdownToHTML(displayValue, variables),
+  const parsedResult = useMemo(
+    () => parseMarkdownWithVisualBlocks(displayValue, variables),
     [displayValue, variables]
   );
+  const parsedHTML = parsedResult.html;
+  const blocks = parsedResult.blocks;
 
   useLayoutEffect(() => {
     if (!editorRef.current) return;
@@ -440,6 +594,46 @@ export function VisualMarkdownEditor({
 
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, []);
+
+  useEffect(() => {
+    if (!activeBlockId) return;
+    if (!blocks.some((block) => block.id === activeBlockId)) {
+      setActiveBlockId(null);
+    }
+  }, [activeBlockId, blocks]);
+
+  const activeBlock = useMemo(() => {
+    if (!activeBlockId) return null;
+    return blocks.find((block) => block.id === activeBlockId) ?? null;
+  }, [blocks, activeBlockId]);
+
+  useEffect(() => {
+    if (activeBlockId) {
+      setBlockMode('visual');
+    }
+  }, [activeBlockId]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const handleBlockToggle = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      const button = target.closest<HTMLButtonElement>('[data-block-button]');
+      if (!button) return;
+      if (!editor.contains(button)) return;
+
+      const blockId = button.getAttribute('data-block-button');
+      if (!blockId) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveBlockId(blockId);
+    };
+
+    editor.addEventListener('click', handleBlockToggle);
+    return () => editor.removeEventListener('click', handleBlockToggle);
   }, []);
 
   const syncSelection = useCallback((root?: HTMLElement) => {
@@ -491,6 +685,103 @@ export function VisualMarkdownEditor({
     },
     [onChange]
   );
+
+  const replaceBlockContent = useCallback(
+    (block: VisualBlock, updatedCode: string) => {
+      if (readOnly) return;
+
+      const content = displayValueRef.current;
+      const normalized = normalizePlainText(updatedCode);
+      const original = content.slice(block.start, block.end);
+      const endsWithNewline = original.endsWith('\n');
+  const fenceLanguage = block.rawLanguage.trim();
+  const openingFence = fenceLanguage ? '```' + fenceLanguage : '```';
+  const closingFence = '```';
+      const replacement =
+        `${openingFence}\n${normalized}\n${closingFence}` + (endsWithNewline ? '\n' : '');
+      const newValue =
+        content.slice(0, block.start) + replacement + content.slice(block.end);
+
+      displayValueRef.current = newValue;
+      onChange(newValue);
+    },
+    [onChange, readOnly]
+  );
+
+  const renderVisualBlock = useCallback(
+    (block: VisualBlock) => {
+      switch (block.type) {
+        case 'mermaid':
+          return (
+            <VisualMermaid
+              code={block.code}
+              onChange={(value) => replaceBlockContent(block, value)}
+              readOnly={readOnly}
+            />
+          );
+        case 'chart':
+          return (
+            <div className="space-y-3">
+              <VisualChartBlock code={block.code} />
+              <p className="text-xs text-muted-foreground">
+                Update the JSON configuration from the Markdown tab to modify this chart.
+              </p>
+            </div>
+          );
+        case 'code':
+        default:
+          return (
+            <CodeEditorBlock
+              value={block.code}
+              language={block.language}
+              onChange={(value) => replaceBlockContent(block, value)}
+              readOnly={readOnly}
+            />
+          );
+      }
+    },
+    [readOnly, replaceBlockContent]
+  );
+
+  const renderMarkdownEditor = useCallback(
+    (block: VisualBlock) => {
+      if (block.type === 'code') {
+        return (
+          <Textarea
+            value={block.code}
+            onChange={(event) => replaceBlockContent(block, event.target.value)}
+            readOnly={readOnly}
+            className="font-mono text-sm min-h-[240px]"
+          />
+        );
+      }
+
+      const language = block.type === 'chart' ? 'json' : block.language;
+
+      return (
+        <CodeEditorBlock
+          value={block.code}
+          language={language}
+          onChange={(value) => replaceBlockContent(block, value)}
+          readOnly={readOnly}
+          height="300px"
+        />
+      );
+    },
+    [readOnly, replaceBlockContent]
+  );
+
+  const resolveBlockTitle = useCallback((block: VisualBlock) => {
+    switch (block.type) {
+      case 'mermaid':
+        return 'Mermaid diagram';
+      case 'chart':
+        return 'Data chart';
+      case 'code':
+      default:
+        return `${block.rawLanguage || 'Code'} block`;
+    }
+  }, []);
 
   const formatText = useCallback(
     (format: 'bold' | 'italic' | 'code' | 'header') => {
@@ -640,6 +931,40 @@ export function VisualMarkdownEditor({
     [applyUpdate, getSelectionSnapshot, readOnly]
   );
 
+  const insertChartBlock = useCallback(() => {
+    if (readOnly) return;
+    const content = displayValueRef.current;
+    const selection = getSelectionSnapshot() ?? {
+      start: content.length,
+      end: content.length
+    };
+
+    const chartLines = [
+      '```chart',
+      '{',
+      '  "type": "bar",',
+      '  "xKey": "label",',
+      '  "series": [',
+      '    { "key": "value", "name": "Value" }',
+      '  ],',
+      '  "data": [',
+      '    { "label": "Alpha", "value": 4 },',
+      '    { "label": "Beta", "value": 7 },',
+      '    { "label": "Gamma", "value": 3 }',
+      '  ]',
+      '}',
+      '```'
+    ];
+
+    const chartSnippet = `\n\n${chartLines.join('\n')}\n\n`;
+
+    const updatedValue =
+      content.slice(0, selection.start) + chartSnippet + content.slice(selection.end);
+
+    const cursor = selection.start + chartSnippet.length;
+    applyUpdate(updatedValue, { start: cursor, end: cursor });
+  }, [applyUpdate, getSelectionSnapshot, readOnly]);
+
   const insertCodeBlock = useCallback(
     (language: string) => {
       if (readOnly) return;
@@ -771,6 +1096,17 @@ export function VisualMarkdownEditor({
           <div className="flex items-center gap-0.5 shrink-0">
             <TableSizePicker onTableSelect={insertTable} />
 
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={insertChartBlock}
+              className="h-6 sm:h-7 md:h-8 px-1 sm:px-1.5 md:px-2 min-w-0"
+              aria-label="Insert chart block"
+              title="Insert chart block"
+            >
+              <BarChart3 className="h-2.5 sm:h-3 w-2.5 sm:w-3" />
+            </Button>
+
             <Dialog open={mermaidOpen} onOpenChange={setMermaidOpen}>
               <DialogTrigger asChild>
                 <Button
@@ -867,6 +1203,44 @@ export function VisualMarkdownEditor({
           </div>
         </div>
       </div>
+
+        <Dialog
+          open={!!activeBlock}
+          onOpenChange={(open) => {
+            if (!open) {
+              setActiveBlockId(null);
+            }
+          }}
+        >
+          <DialogContent className="sm:max-w-3xl">
+            {activeBlock ? (
+              <>
+                <DialogHeader>
+                  <DialogTitle>{resolveBlockTitle(activeBlock)}</DialogTitle>
+                  <DialogDescription>
+                    Toggle between a live preview and the raw markdown for this block. Changes are saved instantly.
+                  </DialogDescription>
+                </DialogHeader>
+                <Tabs
+                  value={blockMode}
+                  onValueChange={(value) => setBlockMode(value as 'visual' | 'markdown')}
+                  className="mt-4"
+                >
+                  <TabsList className="grid w-fit grid-cols-2">
+                    <TabsTrigger value="visual">Visual</TabsTrigger>
+                    <TabsTrigger value="markdown">Markdown</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="visual" className="mt-4 space-y-4">
+                    {renderVisualBlock(activeBlock)}
+                  </TabsContent>
+                  <TabsContent value="markdown" className="mt-4">
+                    {renderMarkdownEditor(activeBlock)}
+                  </TabsContent>
+                </Tabs>
+              </>
+            ) : null}
+          </DialogContent>
+        </Dialog>
     </div>
   );
 }
