@@ -4,7 +4,8 @@ import {
   useEffect,
   useCallback,
   useLayoutEffect,
-  useMemo
+  useMemo,
+  type ChangeEvent
 } from 'react';
 import { Button } from './ui/button';
 import {
@@ -15,16 +16,17 @@ import {
   DialogTitle,
   DialogTrigger
 } from './ui/dialog';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { Textarea } from './ui/textarea';
-import { Code, BarChart3 } from 'lucide-react';
+import { BarChart3, Code } from 'lucide-react';
 import { Separator } from './ui/separator';
 import { MermaidIcon } from './MermaidIcon';
 import { TableSizePicker } from './TableSizePicker';
 import { VisualMermaid } from './VisualMermaid';
 import { VisualChartBlock } from './VisualChartBlock';
 import { CodeEditorBlock } from './CodeEditorBlock';
+import { Textarea } from './ui/textarea';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import type { TemplateVariable } from './VariablesPanel';
+import { createRoot, type Root } from 'react-dom/client';
 
 interface VisualMarkdownEditorProps {
   value: string;
@@ -56,6 +58,18 @@ type VisualBlock = {
 type VisualBlockParseResult = {
   html: string;
   blocks: VisualBlock[];
+};
+
+const resolveBlockLabel = (block: VisualBlock) => {
+  switch (block.type) {
+    case 'mermaid':
+      return 'Mermaid diagram';
+    case 'chart':
+      return 'Chart';
+    case 'code':
+    default:
+      return block.rawLanguage ? `${block.rawLanguage} code` : 'Code block';
+  }
 };
 
 type MarkdownFenceCapture = {
@@ -458,80 +472,97 @@ const parseMarkdownWithVisualBlocks = (
     blockIndexMap.set(index, block);
   });
 
-  const htmlLines: string[] = [];
+  const htmlParts: string[] = [];
 
-  lines.forEach((line, index) => {
-    const blockMeta = lineMeta.get(index);
-    if (blockMeta) {
-      const block = blockIndexMap.get(blockMeta.blockIndex);
-      const languageAttr =
-        blockMeta.role === 'start' && block
-          ? ` data-block-language="${escapeHTML(block.rawLanguage)}"`
-          : '';
-      const toggleButton =
-        blockMeta.role === 'start' && block
-          ? `<button type="button" class="markdown-code-toggle" data-block-button="${block.id}" contenteditable="false" aria-label="Toggle visual editor"></button>`
-          : '';
-
-      htmlLines.push(
-        `<div class="markdown-line markdown-code-block" data-block-id="${block?.id ?? ''}" data-block-role="${blockMeta.role}"${languageAttr}>${toggleButton}<span class="markdown-code-text">${escapeHTML(line)}</span></div>`
-      );
-      return;
+  let index = 0;
+  while (index < lines.length) {
+    const meta = lineMeta.get(index);
+    if (meta && meta.role === 'start') {
+      const block = blockIndexMap.get(meta.blockIndex);
+      if (block) {
+        htmlParts.push(
+          `<div class="markdown-block" data-block-id="${block.id}" data-block-type="${block.type}" contenteditable="false">` +
+            `<div class="markdown-block-toolbar" contenteditable="false">` +
+              `<span class="markdown-block-label" contenteditable="false">${escapeHTML(resolveBlockLabel(block))}</span>` +
+              `<div class="markdown-block-actions" contenteditable="false">` +
+                `<button type="button" class="markdown-block-button" data-block-edit="${block.id}" data-block-edit-mode="visual" contenteditable="false">Visual</button>` +
+                `<button type="button" class="markdown-block-button" data-block-edit="${block.id}" data-block-edit-mode="markdown" contenteditable="false">Markdown</button>` +
+              `</div>` +
+            `</div>` +
+            `<div class="markdown-block-visual" data-block-visual="${block.id}" contenteditable="false"></div>` +
+          `</div>`
+        );
+        index = block.endLine + 1;
+        continue;
+      }
     }
 
+    if (meta) {
+      index += 1;
+      continue;
+    }
+
+    const line = lines[index];
     const trimmed = line.trim();
 
     if (trimmed === '') {
-      htmlLines.push('<div class="markdown-line"><br /></div>');
-      return;
+      htmlParts.push('<div class="markdown-line"><br /></div>');
+      index += 1;
+      continue;
     }
 
     if (/^(---|\*\*\*|___)$/.test(trimmed)) {
-      htmlLines.push('<div class="markdown-line markdown-hr">---</div>');
-      return;
+      htmlParts.push('<div class="markdown-line markdown-hr">---</div>');
+      index += 1;
+      continue;
     }
 
     const headingMatch = line.match(/^(#{1,6})(\s+)(.*)$/);
     if (headingMatch) {
       const [, hashes, spacing, text] = headingMatch;
-      htmlLines.push(
+      htmlParts.push(
         `<div class="markdown-line markdown-h${hashes.length}">${escapeHTML(hashes)}${spacing}${formatInlineMarkdown(text, variables)}</div>`
       );
-      return;
+      index += 1;
+      continue;
     }
 
     const blockquoteMatch = line.match(/^>\s?(.*)$/);
     if (blockquoteMatch) {
-      htmlLines.push(
+      htmlParts.push(
         `<div class="markdown-line markdown-blockquote">&gt; ${formatInlineMarkdown(blockquoteMatch[1], variables)}</div>`
       );
-      return;
+      index += 1;
+      continue;
     }
 
     const listMatch = line.match(/^(\s*)([-*+]|\d+\.)\s+(.*)$/);
     if (listMatch) {
       const [, indent, marker, text] = listMatch;
       const indentHtml = escapeHTML(indent).replace(/ /g, '&nbsp;');
-      htmlLines.push(
+      htmlParts.push(
         `<div class="markdown-line markdown-list">${indentHtml}${escapeHTML(marker)} ${formatInlineMarkdown(text, variables)}</div>`
       );
-      return;
+      index += 1;
+      continue;
     }
 
     if (/^\|.*\|$/.test(trimmed)) {
-      htmlLines.push(
+      htmlParts.push(
         `<div class="markdown-line markdown-table-row">${escapeHTML(line)}</div>`
       );
-      return;
+      index += 1;
+      continue;
     }
 
-    htmlLines.push(
+    htmlParts.push(
       `<div class="markdown-line">${formatInlineMarkdown(line, variables)}</div>`
     );
-  });
+    index += 1;
+  }
 
   return {
-    html: htmlLines.join(''),
+    html: htmlParts.join(''),
     blocks
   };
 };
@@ -547,6 +578,7 @@ export function VisualMarkdownEditor({
   const editorRef = useRef<HTMLDivElement>(null);
   const selectionRef = useRef<SelectionSnapshot | null>(null);
   const [isComposing, setIsComposing] = useState(false);
+  const blockRenderRoots = useRef<Map<string, Root>>(new Map());
   const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
   const [blockMode, setBlockMode] = useState<'visual' | 'markdown'>('visual');
 
@@ -571,6 +603,9 @@ export function VisualMarkdownEditor({
     const target = editorRef.current;
     const wasFocused = isEditableFocused(target);
     const snapshot = wasFocused ? selectionRef.current : null;
+
+    blockRenderRoots.current.forEach((root) => root.unmount());
+    blockRenderRoots.current.clear();
 
     if (parsedHTML) {
       target.innerHTML = parsedHTML;
@@ -597,43 +632,39 @@ export function VisualMarkdownEditor({
   }, []);
 
   useEffect(() => {
-    if (!activeBlockId) return;
-    if (!blocks.some((block) => block.id === activeBlockId)) {
-      setActiveBlockId(null);
-    }
-  }, [activeBlockId, blocks]);
-
-  const activeBlock = useMemo(() => {
-    if (!activeBlockId) return null;
-    return blocks.find((block) => block.id === activeBlockId) ?? null;
-  }, [blocks, activeBlockId]);
-
-  useEffect(() => {
-    if (activeBlockId) {
-      setBlockMode('visual');
-    }
-  }, [activeBlockId]);
-
-  useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
 
-    const handleBlockToggle = (event: MouseEvent) => {
+    const handleBlockEditClick = (event: MouseEvent) => {
       const target = event.target as HTMLElement;
-      const button = target.closest<HTMLButtonElement>('[data-block-button]');
+      const button = target.closest<HTMLButtonElement>('[data-block-edit]');
       if (!button) return;
       if (!editor.contains(button)) return;
 
-      const blockId = button.getAttribute('data-block-button');
+      const blockId = button.getAttribute('data-block-edit');
+      const modeAttr = button.getAttribute('data-block-edit-mode');
       if (!blockId) return;
 
       event.preventDefault();
       event.stopPropagation();
+
       setActiveBlockId(blockId);
+      if (modeAttr === 'markdown' || modeAttr === 'visual') {
+        setBlockMode(modeAttr);
+      } else {
+        setBlockMode('visual');
+      }
     };
 
-    editor.addEventListener('click', handleBlockToggle);
-    return () => editor.removeEventListener('click', handleBlockToggle);
+    editor.addEventListener('click', handleBlockEditClick);
+    return () => editor.removeEventListener('click', handleBlockEditClick);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      blockRenderRoots.current.forEach((root) => root.unmount());
+      blockRenderRoots.current.clear();
+    };
   }, []);
 
   const syncSelection = useCallback((root?: HTMLElement) => {
@@ -709,14 +740,15 @@ export function VisualMarkdownEditor({
   );
 
   const renderVisualBlock = useCallback(
-    (block: VisualBlock) => {
+    (block: VisualBlock, options: { interactive?: boolean } = {}) => {
+      const isInteractive = options.interactive ?? false;
       switch (block.type) {
         case 'mermaid':
           return (
             <VisualMermaid
               code={block.code}
               onChange={(value) => replaceBlockContent(block, value)}
-              readOnly={readOnly}
+              readOnly={readOnly || !isInteractive}
             />
           );
         case 'chart':
@@ -724,7 +756,9 @@ export function VisualMarkdownEditor({
             <div className="space-y-3">
               <VisualChartBlock code={block.code} />
               <p className="text-xs text-muted-foreground">
-                Update the JSON configuration from the Markdown tab to modify this chart.
+                {isInteractive
+                  ? 'Switch to the Markdown tab to update the JSON configuration for this chart.'
+                  : 'Open the editor to update this chart.'}
               </p>
             </div>
           );
@@ -735,7 +769,7 @@ export function VisualMarkdownEditor({
               value={block.code}
               language={block.language}
               onChange={(value) => replaceBlockContent(block, value)}
-              readOnly={readOnly}
+              readOnly={readOnly || !isInteractive}
             />
           );
       }
@@ -749,7 +783,9 @@ export function VisualMarkdownEditor({
         return (
           <Textarea
             value={block.code}
-            onChange={(event) => replaceBlockContent(block, event.target.value)}
+            onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+              replaceBlockContent(block, event.target.value)
+            }
             readOnly={readOnly}
             className="font-mono text-sm min-h-[240px]"
           />
@@ -771,16 +807,66 @@ export function VisualMarkdownEditor({
     [readOnly, replaceBlockContent]
   );
 
-  const resolveBlockTitle = useCallback((block: VisualBlock) => {
-    switch (block.type) {
-      case 'mermaid':
-        return 'Mermaid diagram';
-      case 'chart':
-        return 'Data chart';
-      case 'code':
-      default:
-        return `${block.rawLanguage || 'Code'} block`;
+  const activeBlock = useMemo(() => {
+    if (!activeBlockId) return null;
+    return blocks.find((block) => block.id === activeBlockId) ?? null;
+  }, [activeBlockId, blocks]);
+
+  useEffect(() => {
+    if (activeBlockId && !activeBlock) {
+      setActiveBlockId(null);
     }
+  }, [activeBlockId, activeBlock]);
+
+  useEffect(() => {
+    if (!activeBlockId) {
+      setBlockMode('visual');
+    }
+  }, [activeBlockId]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const activeBlockIds = new Set(blocks.map((block) => block.id));
+
+    blockRenderRoots.current.forEach((root, key) => {
+      const [blockId] = key.split(':');
+      if (!activeBlockIds.has(blockId)) {
+        root.unmount();
+        blockRenderRoots.current.delete(key);
+      }
+    });
+
+    const ensureRoot = (container: HTMLElement, key: string) => {
+      let root = blockRenderRoots.current.get(key);
+      if (!root) {
+        root = createRoot(container);
+        blockRenderRoots.current.set(key, root);
+      }
+      return root;
+    };
+
+    blocks.forEach((block) => {
+      const blockElement = editor.querySelector<HTMLElement>(`[data-block-id="${block.id}"]`);
+      if (!blockElement) return;
+
+      const visualContainer = blockElement.querySelector<HTMLElement>(
+        `[data-block-visual="${block.id}"]`
+      );
+
+      if (visualContainer) {
+        const visualRoot = ensureRoot(visualContainer, `${block.id}:visual`);
+        visualRoot.render(renderVisualBlock(block, { interactive: false }));
+      }
+    });
+  }, [blocks, renderVisualBlock]);
+
+  useEffect(() => {
+    return () => {
+      blockRenderRoots.current.forEach((root) => root.unmount());
+      blockRenderRoots.current.clear();
+    };
   }, []);
 
   const formatText = useCallback(
@@ -1216,14 +1302,14 @@ export function VisualMarkdownEditor({
             {activeBlock ? (
               <>
                 <DialogHeader>
-                  <DialogTitle>{resolveBlockTitle(activeBlock)}</DialogTitle>
+                  <DialogTitle>{resolveBlockLabel(activeBlock)}</DialogTitle>
                   <DialogDescription>
-                    Toggle between a live preview and the raw markdown for this block. Changes are saved instantly.
+                    Switch between a live preview and the raw markdown for this block. Changes update immediately.
                   </DialogDescription>
                 </DialogHeader>
                 <Tabs
                   value={blockMode}
-                  onValueChange={(value) => setBlockMode(value as 'visual' | 'markdown')}
+                  onValueChange={(value: string) => setBlockMode(value === 'markdown' ? 'markdown' : 'visual')}
                   className="mt-4"
                 >
                   <TabsList className="grid w-fit grid-cols-2">
@@ -1231,7 +1317,7 @@ export function VisualMarkdownEditor({
                     <TabsTrigger value="markdown">Markdown</TabsTrigger>
                   </TabsList>
                   <TabsContent value="visual" className="mt-4 space-y-4">
-                    {renderVisualBlock(activeBlock)}
+                    {renderVisualBlock(activeBlock, { interactive: true })}
                   </TabsContent>
                   <TabsContent value="markdown" className="mt-4">
                     {renderMarkdownEditor(activeBlock)}
